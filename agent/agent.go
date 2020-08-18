@@ -198,57 +198,59 @@ func processBeacon(data []byte) map[string]interface{} {
 	return beacon
 }
 
-// Handle a failed beacon.  If the consecutive failure counter has not been reached,
-// the agent will sleep for the previously used sleep duration (15 seconds default).
-// If the failure counter is reached, the agent will perform the following protocol:
-//		- If currently attempting direct C2 access, switch to proxy mode and start trying receivers.
-//		- If there are no receivers available to begin with, sleep twice the previous sleep duration and continue
-//			attempting direct access to the first successful server.
-//		- If no more receivers are left to try out, and if the agent has never successfully reached the C2,
-//			error out. Otherwise, sleep twice the previous sleep duration and try direct access to the
-//			first successful server/proxy.
+/*
+ Handle a failed beacon.  If the consecutive failure counter has not been reached,
+the agent will sleep for the previous server-provided sleep duration (15 seconds default).
+If the failure counter is reached, the agent will perform the following protocol:
+	- Check if there are any available peer proxy receivers to use to reach the C2.
+	- If there are no more proxies available, and if the agent hasn't successfully reached the C2 before, throw error.
+	- If there are no more proxies available because they have all been attempted previously, refresh
+		the proxy list, sleep double the previous server-provided sleep duration before trying the first
+		successful server address and comms method.
+	- If there are no proxies available because there were none to begin with, sleep double the previous
+		server-provided sleep duration before trying the first successful server address and comms method.
+	- Otherwise, there are proxies left to try out. Pick one, sleep for the previous server-provided sleep duration
+		(15 seconds default) before reattempting beacons.
+*/
 func (a *Agent) HandleBeaconFailure() error {
 	a.failedBeaconCounter += 1
 	if a.failedBeaconCounter >= beaconFailureThreshold {
 		// Reset counter and retry.
 		a.failedBeaconCounter = 0
-		output.VerbosePrint("[!] Reached beacon failure threshold.")
+		output.VerbosePrint("[!] Reached beacon failure threshold. Will attempt available proxy receivers")
 
-		if !a.usingPeerReceivers {
-			// If not currently reaching out via proxy, check if there are available peer proxy receivers.
-			a.usingPeerReceivers = true
-			output.VerbosePrint("[*] Will start attempting available proxy receivers.")
+		if err := a.findAvailablePeerProxyClient(); err != nil {
+			output.VerbosePrint("[!] No more available peer proxy receivers.")
+
+			// No more available receivers. If we haven't reached the C2 before, error out.
+			if len(a.firstSuccessFulServer) == 0 {
+				return errors.New("Reached failure threshold for initial C2 communications. No available proxy receivers.")
+			}
+
+			// Check if there were any receivers to begin with so we can refresh the list for later.
 			if len(a.exhaustedPeerReceivers) > 0 {
 				output.VerbosePrint("[*] Refreshing proxy receiver list.")
 				a.refreshAvailablePeerReceivers()
 			}
-		}
-		if err := a.findAvailablePeerProxyClient(); err != nil {
-			// No more available receivers. If we haven't reached C2 before, error out.
-			if len(a.firstSuccessFulServer) == 0 {
-				return errors.New("Reached failure threshold for initial C2 communications. No available proxy receivers.")
-			}
-			output.VerbosePrint("[!] No more available peer proxy receivers.")
 
 			// We've iterated through all available proxy receivers, or there were none to begin with.
 			// Fallback to first successful server & comms
 			a.fallbackToFirstSuccessFulServer()
 			return nil
 		}
+		// We still have peer receivers to try out. Sleep and keep going.
 	}
-	// Sleep and keep going.
 	a.Sleep(a.normalSleepTime, false)
 	return nil
 }
 
 // Helper method for HandleBeaconFailure.
-// Will switch agent to no-proxy mode, and sleep before trying direct C2 access again to first successful server/comms.
+// Will sleep extra before trying C2 access again using first successful server/comms.
 func (a *Agent) fallbackToFirstSuccessFulServer() {
 	extraSleepTime := a.normalSleepTime * 2
 	a.updateUpstreamServer(a.firstSuccessFulServer)
 	a.updateUpstreamComs(a.firstSuccessFulComs)
-	output.VerbosePrint(fmt.Sprintf("[*] Will retry direct C2 access to %s after sleeping for %d seconds.", a.server, int(extraSleepTime)))
-	a.usingPeerReceivers = false
+	output.VerbosePrint(fmt.Sprintf("[*] Falling back to first successful server address %s after sleeping for %d seconds.", a.server, int(extraSleepTime)))
 	a.Sleep(extraSleepTime, false)
 }
 
