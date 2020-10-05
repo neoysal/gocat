@@ -2,8 +2,14 @@
 
 package shells
 
-import "syscall"
+import (
+	"syscall"
+)
 
 func getPlatformSysProcAttrs() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{}
+}
+
+func setCmdLine(sysprocattr *syscall.SysProcAttr, agrs []string) {
+	//EmptyStmt = .
 }
